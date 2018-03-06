@@ -448,6 +448,51 @@ bucket schema changes. In terms of implementation details, this method would not
 be that much different, though it would require some extra metadata to identify
 the target schema for a transition.
 
+### Schema Versioning
+
+Modifying Postgres relations while serving low-latency responses to requests
+modifying those tables is border-line intractable due to locking.
+One way we might get around this problem is with versioning. For example,
+instead of running an expensive and potentially locking operation to add a
+column to a table, we might instead create a new table with the desired schema
+and divert future incoming traffic to use the new table. Since we'll want to
+then access objects written with the old schema, there will have to be a
+mechanism for migrating objects to the new table. This could be done using an
+on-demand strategy when an object living in an old table is next read.
+
+The `buckets_config` table seems the logical place to start. We may
+amend the table with a new column holding some pointer to the current relation
+(table name or relation OID, for example). We can cache this value at Moray and
+let each process poll `buckets_config` to update this cache so as to
+discover schema changes committed by other Moray processes.
+
+When a request reaches a Moray process, the process determines what buckets
+are involved in servicing the request. For each of these, the process can look
+up the corresponding relation pointers for each bucket in its cache.
+It's possible that this will result in less-than-current versions of the
+buckets, which implies that some objects might be written to out-dated tables.
+As long as added columns have reasonable default values, the on-demand
+triggers will take care of migrating objects from old tables to the new tables
+when necessary.
+
+#### Problems and Considerations
+
+There are a number of open questions regarding the versioning approach above.
+1. Are there always reasonable default values to fill in when migrating an
+   object to a table with new columns?
+3. Should we allow a schema change for a given table if one is already running?
+4. How large of a version history should we maintain, if any?
+5. If we use a Postgres trigger to copy an object from a previous table version
+   to a new one when it is read, then a read-heavy workload for a large number
+   of objects stored in a previous table version becomes a read and double-write
+   (one write to create the new row, one to delete the old) workload for those
+   objects. Is this okay?
+A final question is whether we should delete tables that no longer store any
+objects. If we were to implement this, it would have to be part of the Postgres
+trigger that migrates an object when it is next read. The trigger would need to
+be able to check the size of the table quickly (or at least determine whether
+it is zero).
+
 ## Further Inquiry
 
 Testing (under load) is required to determine what sorts of schema changes are
